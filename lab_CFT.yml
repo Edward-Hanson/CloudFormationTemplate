@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: IAM automation lab for users, groups, and events
+
+Resources:
+  TempPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: TempPassword
+      Description: Universal password for IAM users
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: "password"
+        PasswordLength: 12
+        ExcludeCharacters: '"@/\'
+
+  S3UserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: S3UserGroup
+      Policies:
+      - PolicyName: S3ReadAccess
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action: "s3:ListBucket"
+            Resource: "*"
+
+  EC2UserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: EC2UserGroup
+      Policies:
+      - PolicyName: EC2ReadAccess
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action: "ec2:Describe*"
+            Resource: "*"
+
+  S3User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: s3-user
+      Groups: [ !Ref S3UserGroup ]
+      LoginProfile:
+        Password: !Join [ '', [ '{{resolve:secretsmanager:', !Ref TempPassword, ':SecretString:password}}' ] ]
+        PasswordResetRequired: true
+
+  EC2User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: ec2-user
+      Groups: [ !Ref EC2UserGroup ]
+      LoginProfile:
+        Password: !Join [ '', [ '{{resolve:secretsmanager:', !Ref TempPassword, ':SecretString:password}}' ] ]
+        PasswordResetRequired: true
+
+  S3EmailParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /user/s3-user/email
+      Type: String
+      Value: s3-user@mymail.com
+
+  EC2EmailParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /user/ec2-user/email
+      Type: String
+      Value: ec2-user@mymail.com
+
+  NotifyUserCreationFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: NotifyUserCreationFunctionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: LambdaSecretsSSMLogs
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: "*"
+          - Effect: Allow
+            Action:
+            - secretsmanager:GetSecretValue
+            - ssm:GetParameter
+            Resource: "*"
+
+  NotifyUserCreationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: NotifyUserCreationFunction
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt NotifyUserCreationFunctionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+              username = event['detail']['requestParameters']['userName']
+              secrets = boto3.client('secretsmanager')
+
+              try:
+                secret = secrets.get_secret_value(SecretId="TempPassword")
+                password = json.loads(secret['SecretString'])['password']
+
+                
+
+                logger.info(f"New IAM user created | Email: {username} | Temporary Password: {password}")
+                
+              except Exception as e:
+                 logger.error(f"Error processing user {username}: {e}")
+
+  UserCreationEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: NewIAMUserRule
+      EventPattern:
+        source:
+          - "aws.iam"
+        detail-type:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventSource:
+            - "iam.amazonaws.com"
+          eventName:
+            - "CreateUser"
+      Targets:
+        - Arn: !GetAtt NotifyUserCreationFunction.Arn
+          Id: TargetFunctionV1
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NotifyUserCreationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UserCreationEventRule.Arn
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/NotifyUserCreationFunction
+      RetentionInDays: 7
