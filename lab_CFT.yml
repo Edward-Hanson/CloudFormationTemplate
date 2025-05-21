@@ -123,7 +123,7 @@ Resources:
                 secret = secrets.get_secret_value(SecretId="TempPassword")
                 password = json.loads(secret['SecretString'])['password']
 
-                
+
 
                 logger.info(f"New IAM user created | Email: {username} | Temporary Password: {password}")
                 
@@ -161,3 +161,4 @@ Resources:
     Properties:
       LogGroupName: /aws/lambda/NotifyUserCreationFunction
       RetentionInDays: 7
+
